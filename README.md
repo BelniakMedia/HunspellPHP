@@ -1,6 +1,11 @@
 # Hunspell PHP wrapper
 Forked from [johnzuk/HunspellPHP](https://github.com/johnzuk/HunspellPHP)
 
+### Version 3.0.0 (Very minor backward breaking change)
+This version updates the constructor signature with a different (better?) default value for `$encoding`, so if anyone was using that this would be a backward breaking change. Otherwise, a new constructor argument $custom_word_file (path) has been added and will bind your provided custom word list with your dictionary in real time.
+
+The other change this version takes care of is using `proc_open` and better env/encoding handling in general. We also now emmit an `error_log()` call so stderr output from the hunspell process are logged properly.
+
 ### Version 2.0.0
 Version 2.0.0 and above requires PHP ^8.0.0 and includes an important fix to the result matcher regex. If you need this for an older version of PHP I recommend that you fork 1.2 and update the regex matcher property of the Hunspell class to what is set in the current version of the code.
 

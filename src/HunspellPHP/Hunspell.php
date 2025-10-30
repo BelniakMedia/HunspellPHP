@@ -1,6 +1,9 @@
 <?php
 /** @noinspection PhpUnused */
+
 namespace HunspellPHP;
+
+use function is_resource;
 
 class Hunspell
 {
@@ -20,22 +23,26 @@ class Hunspell
     protected string $encoding;
     protected string $dictionary;
     protected string $dictionary_path;
+    protected string $custom_words_file;
     protected string $matcher =
         '/(?P<type>\*|\+|&|#|-)\s?(?P<original>\w+)?\s?(?P<count>\d+)?\s?(?P<offset>\d+)?:?\s?(?P<misses>.*+)?/u';
 
     /**
      * @param string $dictionary Dictionary name e.g.: 'en_US' (default)
-     * @param string $encoding Encoding e.g.: 'utf-8' (default)
-     * @param ?string $dictionary_path Specify the directory of the dictionary file (optional)
+     * @param string $encoding Encoding e.g.: 'UTF-8' (default)
+     * @param string|null $dictionary_path Specify the directory of the dictionary file (optional)
+     * @param string|null $custom_words_file Specify the path to the custom words file (optional)
      */
     public function __construct(
         string $dictionary = 'en_US',
-        string $encoding = 'en_US.utf-8',
-        ?string $dictionary_path = null
+        string $encoding = 'UTF-8',
+        ?string $dictionary_path = null,
+        ?string $custom_words_file = null
     ) {
         $this->dictionary = $this->clear($dictionary);
         $this->encoding = $this->clear($encoding);
-        $this->dictionary_path = $dictionary_path;
+        $this->dictionary_path = $dictionary_path ?? '';
+        $this->custom_words_file = $custom_words_file ?? '';
     }
 
 
@@ -132,6 +139,81 @@ class Hunspell
         return (string)preg_replace('[^a-zA-Z0-9_-\.]', '', $input);
     }
 
+    protected function hunspellSuggest(string $input, bool $stemSwitch): array
+    {
+        $timeoutMs = 1000;
+        $encoding = strtoupper(trim($this->encoding));
+        $dictionary_file = $this->dictionary_path
+            ? rtrim($this->dictionary_path, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $this->dictionary
+            : $this->dictionary;
+
+        $cmd = ['hunspell', '-a', '-d', trim($dictionary_file), '-i', $encoding];
+        if($stemSwitch) { $cmd[] = '-s'; }
+
+        if($this->custom_words_file) {
+            if(!file_exists($this->custom_words_file)) {
+                error_log('WARNING: HunspellPHP - $custom_words_file "' . $this->custom_words_file . '" not found.');
+            } else {
+                $cmd[] = '-p';
+                $cmd[] = $this->custom_words_file;
+            }
+        }
+
+        $descriptors = [
+            0 => ['pipe', 'r'],  // stdin
+            1 => ['pipe', 'w'],  // stdout
+            2 => ['pipe', 'w'],  // stderr
+        ];
+
+        $env = getenv();
+        $env['LC_ALL'] = $env['LANG'] = PHP_OS_FAMILY === 'Windows' ? "$this->dictionary.$encoding" : "C.$encoding";
+        $proc = proc_open($cmd, $descriptors, $pipes, null, $env);
+        if (!is_resource($proc)) {
+            return ['', 'proc_open failed', 1];
+        }
+
+        // Write the input word(s) followed by newline, as hunspell expects one per line.
+        fwrite($pipes[0], $input . "\n");
+        fclose($pipes[0]);
+
+        // Simple, bounded read with a timeout.
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $deadline = microtime(true) + ($timeoutMs / 1000);
+        $out = '';
+        $err = '';
+        do {
+            $read = [$pipes[1], $pipes[2]];
+            $write = $except = [];
+            $left = max(0, (int)round(($deadline - microtime(true)) * 1_000_000));
+            if ($left === 0) {
+                break;
+            }
+            if (@stream_select($read, $write, $except, 0, $left) !== false) {
+                foreach ($read as $r) {
+                    if ($r === $pipes[1]) {
+                        $out .= stream_get_contents($pipes[1]) ?: '';
+                    }
+                    if ($r === $pipes[2]) {
+                        $err .= stream_get_contents($pipes[2]) ?: '';
+                    }
+                }
+            }
+        } while (microtime(true) < $deadline);
+
+        // Drain remaining data.
+        $out .= stream_get_contents($pipes[1]) ?: '';
+        $err .= stream_get_contents($pipes[2]) ?: '';
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        $status = proc_get_status($proc);
+        $exit = $status['exitcode'] ?? 0;
+        proc_close($proc);
+
+        return [$out, $err, $exit];
+    }
+
     /**
      * @param string $input
      * @param bool $stem_mode
@@ -139,15 +221,11 @@ class Hunspell
      */
     protected function findCommand(string $input, bool $stem_mode = false): string
     {
-        $stem_switch = $stem_mode ? ' -s' : '';
-        $dictionary = $this->dictionary_path
-            ? rtrim($this->dictionary_path, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $this->dictionary
-            : $this->dictionary;
-		if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-			return (string)shell_exec(sprintf("powershell \"set LANG='%s'; echo '%s' | hunspell -d %s%s\"", $this->encoding, $input, $dictionary, $stem_switch));
-		} else {
-			return (string)shell_exec(sprintf("export LANG='%s'; echo '%s' | hunspell -d %s%s", $this->encoding, $input, $dictionary, $stem_switch));
-		}
+        [$stdout, $stderr] = $this->hunspellSuggest($input, $stem_mode);
+        if($stderr !== '') {
+            error_log('hunspell stderr: ' . trim($stderr));
+        }
+        return $stdout;
     }
 
     /**
@@ -161,9 +239,9 @@ class Hunspell
         array_shift($result);
         $words = array_map('trim', preg_split('/\W/', $words));
 
-        if(sizeof($result) != sizeof($words)) {
-        	return [];
-		}
+        if (sizeof($result) != sizeof($words)) {
+            return [];
+        }
         return array_combine($words, $result);
     }
 
@@ -180,27 +258,33 @@ class Hunspell
                 $matches['input'],
                 $matches['type']
             );
-        } else if ($matches['type'] == Hunspell::ROOT) {
-            return new HunspellResponse(
-                $matches['original'],
-                $matches['input'],
-                $matches['type']
-            );
-        } else if ($matches['type'] == Hunspell::MISS) {
-            return new HunspellResponse(
-                '',
-                $matches['original'],
-                $matches['type'],
-                $matches['offset'],
-                explode(", ", $matches['misses'])
-            );
-        } else if ($matches['type'] == Hunspell::NONE) {
-            return new HunspellResponse(
-                '',
-                $matches['input'],
-                $matches['type'],
-                $matches['count']
-            );
+        } else {
+            if ($matches['type'] == Hunspell::ROOT) {
+                return new HunspellResponse(
+                    $matches['original'],
+                    $matches['input'],
+                    $matches['type']
+                );
+            } else {
+                if ($matches['type'] == Hunspell::MISS) {
+                    return new HunspellResponse(
+                        '',
+                        $matches['original'],
+                        $matches['type'],
+                        $matches['offset'],
+                        explode(", ", $matches['misses'])
+                    );
+                } else {
+                    if ($matches['type'] == Hunspell::NONE) {
+                        return new HunspellResponse(
+                            '',
+                            $matches['input'],
+                            $matches['type'],
+                            $matches['count']
+                        );
+                    }
+                }
+            }
         }
 
         throw new InvalidMatchTypeException(sprintf("Match type %s is invalid", $matches['type']));
@@ -217,11 +301,11 @@ class Hunspell
         $stems = [];
         foreach ($matches as $match) {
             $stem = explode(' ', $match);
-            if (isset($stem[1]) && !empty($stem[1])) {
+            if (!empty($stem[1])) {
                 if (!in_array($stem[1], $stems)) {
                     $stems[] = $stem[1];
                 }
-            } elseif (isset($stem[0]) && !empty($stem[0])) {
+            } elseif (!empty($stem[0])) {
                 if (!in_array($stem[0], $stems)) {
                     $stems[] = $stem[0];
                 }

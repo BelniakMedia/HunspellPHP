@@ -1,4 +1,13 @@
 ## Changelog
+### Version 3.0.0
+#### Added
+- New optional constructor argument `$custom_words_file` which takes a path to a custom word list to be merged with the dictionary at runtime.
+- Windows/Linux environments now use the same process execution code.
+- Hunspell process invocation is now handled through `proc_open` instead of `shell_exec`.
+- Hunspell `stderr` output is now logged via `error_log()` call.
+#### Changed
+- Changed constructor argument `$encoding` default value from 'en_US.utf-8' to 'UTF-8'.
+
 ### Version 2.0.0
 #### Added
 - Added PHP8.0 typed class, 
