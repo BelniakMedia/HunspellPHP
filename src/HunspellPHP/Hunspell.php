@@ -129,9 +129,28 @@ class Hunspell
      */
     public function stem(string $words): HunspellStemResponse
     {
-        $result = explode(PHP_EOL, $this->findCommand($words, true));
-        $result['input'] = $words;
-        return $this->stemParse($result);
+        $raw = $this->findCommand($words, true);
+
+        // Normalize newlines
+        $raw = str_replace(["\r\n", "\r"], "\n", $raw);
+        $lines = preg_split('/\n/', $raw) ?: [];
+
+        // Keep only real stem result lines
+        $lines = array_values(array_filter(array_map('trim', $lines), static function (string $line): bool {
+            if ($line === '') {
+                return false;
+            }
+            if (str_starts_with($line, '@(#)')) {
+                return false;
+            }
+            // stem lines contain at least two tokens
+            return preg_match('/\S+\s+\S+/u', $line) === 1;
+        }));
+
+        return $this->stemParse([
+            'input' => $words,
+            'lines' => $lines,
+        ]);
     }
 
     /**
@@ -153,12 +172,21 @@ class Hunspell
             : $this->dictionary;
 
         // Build command
-        $cmd = ['hunspell', '-a', '-d', trim($dictionaryFile), '-i', $encoding];
+        $cmd = ['hunspell'];
+
         if ($stemSwitch) {
+            // Stem mode
             $cmd[] = '-s';
+        } else {
+            // Spellcheck (interactive) mode
+            $cmd[] = '-a';
         }
 
-        // Only add -p if file exists
+        $cmd[] = '-d';
+        $cmd[] = trim($dictionaryFile);
+        $cmd[] = '-i';
+        $cmd[] = $encoding;
+
         if (!empty($this->custom_words_file) && file_exists($this->custom_words_file)) {
             $cmd[] = '-p';
             $cmd[] = $this->custom_words_file;
@@ -384,21 +412,28 @@ class Hunspell
      */
     protected function stemParse(array $matches): HunspellStemResponse
     {
-        $input = $matches['input'];
-        unset($matches['input']);
+        $input = (string)($matches['input'] ?? '');
+        $lines = $matches['lines'] ?? [];
+
         $stems = [];
-        foreach ($matches as $match) {
-            $stem = explode(' ', $match);
-            if (!empty($stem[1])) {
-                if (!in_array($stem[1], $stems)) {
-                    $stems[] = $stem[1];
-                }
-            } elseif (!empty($stem[0])) {
-                if (!in_array($stem[0], $stems)) {
-                    $stems[] = $stem[0];
-                }
+        foreach ($lines as $line) {
+            $line = trim((string)$line);
+            if ($line === '') {
+                continue;
+            }
+
+            // Split by any whitespace; hunspell can separate with multiple spaces/tabs.
+            $parts = preg_split('/\s+/u', $line, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+            if (count($parts) < 2) {
+                continue;
+            }
+
+            $stem = $parts[1] ?? '';
+            if ($stem !== '' && !in_array($stem, $stems, true)) {
+                $stems[] = $stem;
             }
         }
+
         return new HunspellStemResponse($input, $stems);
     }
 
