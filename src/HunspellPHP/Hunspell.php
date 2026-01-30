@@ -20,6 +20,8 @@ class Hunspell
         Hunspell::COMPOUND => 'COMPOUND'
     ];
 
+    private array $env;
+
     protected string $encoding;
     protected string $dictionary;
     protected string $dictionary_path;
@@ -43,6 +45,8 @@ class Hunspell
         $this->encoding = $this->clear($encoding);
         $this->dictionary_path = $dictionary_path ?? '';
         $this->custom_words_file = $custom_words_file ?? '';
+
+        $this->env = getenv();
     }
 
 
@@ -120,13 +124,13 @@ class Hunspell
     }
 
     /**
-     * @param string $word word to find
+     * @param string $words word to find
      * @return HunspellStemResponse
      */
-    public function stem(string $word): HunspellStemResponse
+    public function stem(string $words): HunspellStemResponse
     {
-        $result = explode(PHP_EOL, $this->findCommand($word, true));
-        $result['input'] = $word;
+        $result = explode(PHP_EOL, $this->findCommand($words, true));
+        $result['input'] = $words;
         return $this->stemParse($result);
     }
 
@@ -142,22 +146,31 @@ class Hunspell
     protected function hunspellSuggest(string $input, bool $stemSwitch): array
     {
         $timeoutMs = 1000;
+
         $encoding = strtoupper(trim($this->encoding));
-        $dictionary_file = $this->dictionary_path
+        $dictionaryFile = $this->dictionary_path
             ? rtrim($this->dictionary_path, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $this->dictionary
             : $this->dictionary;
 
-        $cmd = ['hunspell', '-a', '-d', trim($dictionary_file), '-i', $encoding];
-        if($stemSwitch) { $cmd[] = '-s'; }
-
-        if($this->custom_words_file) {
-            if(!file_exists($this->custom_words_file)) {
-                error_log('WARNING: HunspellPHP - $custom_words_file "' . $this->custom_words_file . '" not found.');
-            } else {
-                $cmd[] = '-p';
-                $cmd[] = $this->custom_words_file;
-            }
+        // Build command
+        $cmd = ['hunspell', '-a', '-d', trim($dictionaryFile), '-i', $encoding];
+        if ($stemSwitch) {
+            $cmd[] = '-s';
         }
+
+        // Only add -p if file exists
+        if (!empty($this->custom_words_file) && file_exists($this->custom_words_file)) {
+            $cmd[] = '-p';
+            $cmd[] = $this->custom_words_file;
+        } elseif (!empty($this->custom_words_file)) {
+            error_log('WARNING: HunspellPHP - $custom_words_file "' . $this->custom_words_file . '" not found.');
+        }
+
+        $tokens = preg_split('/\R+|\s+/u', trim($input), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        if (empty($tokens)) {
+            return ['', '', 0];
+        }
+        $batchedInput = implode("\n", $tokens) . "\n";
 
         $descriptors = [
             0 => ['pipe', 'r'],  // stdin
@@ -165,51 +178,56 @@ class Hunspell
             2 => ['pipe', 'w'],  // stderr
         ];
 
-        $env = getenv();
-        $env['LC_ALL'] = $env['LANG'] = PHP_OS_FAMILY === 'Windows' ? "$this->dictionary.$encoding" : "C.$encoding";
-        $proc = proc_open($cmd, $descriptors, $pipes, null, $env);
+        // Build minimal env with locale data to pass to proc
+        $this->env['LC_ALL'] = $this->env['LANG'] = PHP_OS_FAMILY === 'Windows'
+            ? $this->dictionary . '.' . $encoding
+            : 'C.UTF-8';
+
+        $proc = proc_open($cmd, $descriptors, $pipes, null, $this->env);
         if (!is_resource($proc)) {
             return ['', 'proc_open failed', 1];
         }
 
-        // Write the input word(s) followed by newline, as hunspell expects one per line.
-        fwrite($pipes[0], $input . "\n");
+        // Write all in one go and close stdin so hunspell can exit cleanly
+        fwrite($pipes[0], $batchedInput);
         fclose($pipes[0]);
 
-        // Simple, bounded read with a timeout.
+        // Non-blocking read
         stream_set_blocking($pipes[1], false);
         stream_set_blocking($pipes[2], false);
+
+        // Enforce Deadline
         $deadline = microtime(true) + ($timeoutMs / 1000);
         $out = '';
         $err = '';
-        do {
-            $read = [$pipes[1], $pipes[2]];
-            $write = $except = [];
-            $left = max(0, (int)round(($deadline - microtime(true)) * 1_000_000));
-            if ($left === 0) {
+
+        while (true) {
+            $out .= stream_get_contents($pipes[1]) ?: '';
+            $err .= stream_get_contents($pipes[2]) ?: '';
+
+            $status = proc_get_status($proc);
+            if (!$status['running']) {
                 break;
             }
-            if (@stream_select($read, $write, $except, 0, $left) !== false) {
-                foreach ($read as $r) {
-                    if ($r === $pipes[1]) {
-                        $out .= stream_get_contents($pipes[1]) ?: '';
-                    }
-                    if ($r === $pipes[2]) {
-                        $err .= stream_get_contents($pipes[2]) ?: '';
-                    }
-                }
-            }
-        } while (microtime(true) < $deadline);
 
-        // Drain remaining data.
+            if (microtime(true) >= $deadline) {
+                // IMPORTANT: terminate, otherwise proc_close() can still block.
+                proc_terminate($proc);
+                break;
+            }
+
+            // Avoid hammer locking cpu during loop
+            usleep(1000);
+        }
+
+        // Drain the pipes
         $out .= stream_get_contents($pipes[1]) ?: '';
         $err .= stream_get_contents($pipes[2]) ?: '';
+
         fclose($pipes[1]);
         fclose($pipes[2]);
 
-        $status = proc_get_status($proc);
-        $exit = $status['exitcode'] ?? 0;
-        proc_close($proc);
+        $exit = proc_close($proc);
 
         return [$out, $err, $exit];
     }
@@ -235,14 +253,84 @@ class Hunspell
      */
     protected function preParse(string $input, string $words): array
     {
-        $result = explode("\n", trim($input));
-        array_shift($result);
-        $words = array_map('trim', preg_split('/\W/', $words));
+        $input = str_replace(["\r\n", "\r"], "\n", $input);
 
-        if (sizeof($result) != sizeof($words)) {
+        // Tokenize words the same way the batched hunspell call does: whitespace/newlines.
+        $tokens = preg_split('/\s+/u', trim($words), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $tokens = array_values(array_map('trim', $tokens));
+
+        if (empty($tokens)) {
             return [];
         }
-        return array_combine($words, $result);
+
+        // Split stdout into blocks separated by blank lines.
+        // Skip the hunspell banner/header lines starting with "@(#)".
+        $rawLines = preg_split('/\n/', $input);
+        $blocks = [];
+        $current = [];
+
+        foreach ($rawLines as $line) {
+            $t = trim($line);
+
+            if ($t !== '' && str_starts_with($t, '@(#)')) {
+                continue;
+            }
+
+            if ($t === '') {
+                if (!empty($current)) {
+                    $blocks[] = $current;
+                    $current = [];
+                }
+                continue;
+            }
+
+            $current[] = $t;
+        }
+
+        if (!empty($current)) {
+            $blocks[] = $current;
+        }
+
+        if (count($blocks) !== count($tokens)) {
+            return [];
+        }
+
+        // Normalize each block to a single line compatible with the existing matcher.
+        $out = [];
+        foreach ($tokens as $i => $token) {
+            $lines = $blocks[$i];
+            $first = $lines[0] ?? '';
+
+            // Merge any extra lines (e.g. ", ASTM") into the "misses" list.
+            // We strip a leading comma/space and append as additional misses.
+            $extras = [];
+            for ($j = 1; $j < count($lines); $j++) {
+                $extra = trim($lines[$j]);
+                if ($extra === '') {
+                    continue;
+                }
+
+                // Hunspell often prefixes extra suggestions with ",".
+                $extra = preg_replace('/^[,]\s*/u', '', $extra);
+                if ($extra !== '') {
+                    $extras[] = $extra;
+                }
+            }
+
+            if (!empty($extras) && preg_match('/^(?:&|#|\+|-)/u', $first)) {
+                // If the first line already has a ":" misses list, append to it.
+                if (str_contains($first, ':')) {
+                    $first .= ', ' . implode(', ', $extras);
+                } else {
+                    // Otherwise create a misses list.
+                    $first .= ': ' . implode(', ', $extras);
+                }
+            }
+
+            $out[$token] = $first;
+        }
+
+        return $out;
     }
 
     /**
