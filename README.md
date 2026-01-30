@@ -1,6 +1,9 @@
 # Hunspell PHP wrapper
 Forked from [johnzuk/HunspellPHP](https://github.com/johnzuk/HunspellPHP)
 
+### Version 4.0.0 (Optimization +Batch Mode)
+This version changes find() and possibly stem() (I'm not exactly sure how stem() functioned before as I did not use it, but I updated to be compatible with the changes made under the hood to `hunspellSuggest()`). The changes to `hunspellSuggest()` can now take a space-separated string of words to batch process. This change allows a single process call to handle many spell checks (and stems) rather than having to invoke the process once for each word. The update also ensures the 1000ms timeout "deadline" is not forcing the process to wait that time before ending which appeared to be the case in previous versions.
+
 ### Version 3.0.0 (Very minor backward breaking change)
 This version updates the constructor signature with a different (better?) default value for `$encoding`, so if anyone was using that this would be a backward breaking change. Otherwise, a new constructor argument $custom_word_file (path) has been added and will bind your provided custom word list with your dictionary in real time.
 

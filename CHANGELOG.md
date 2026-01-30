@@ -1,4 +1,9 @@
 ## Changelog
+### Version 4.0.0
+### Updated
+- Moved `getenv()` call to constructor and stored env data as a class property for caching to ensure the call is not made more than once per instance.
+- Refactored `hunspellSuggest()` to work with space-separated list of words and return parsed result batch - This avoids needing to invoke the proc for each word which was a major performance issue.
+- Updated `stem()`, `stemParse()` and `hunspellSuggest()` to ensure the stem branch of this library works correctly after the batch improvement.
 ### Version 3.0.0
 #### Added
 - New optional constructor argument `$custom_words_file` which takes a path to a custom word list to be merged with the dictionary at runtime.
