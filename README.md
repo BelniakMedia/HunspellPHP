@@ -1,7 +1,7 @@
 # Hunspell PHP wrapper
 Forked from [johnzuk/HunspellPHP](https://github.com/johnzuk/HunspellPHP)
 
-### Version 4.0.0 (Optimization +Batch Mode)
+### Version 4.x (Optimization +Batch Mode)
 This version changes find() and possibly stem() (I'm not exactly sure how stem() functioned before as I did not use it, but I updated to be compatible with the changes made under the hood to `hunspellSuggest()`). The changes to `hunspellSuggest()` can now take a space-separated string of words to batch process. This change allows a single process call to handle many spell checks (and stems) rather than having to invoke the process once for each word. The update also ensures the 1000ms timeout "deadline" is not forcing the process to wait that time before ending which appeared to be the case in previous versions.
 
 ### Version 3.0.0 (Very minor backward breaking change)
@@ -9,7 +9,7 @@ This version updates the constructor signature with a different (better?) defaul
 
 The other change this version takes care of is using `proc_open` and better env/encoding handling in general. We also now emmit an `error_log()` call so stderr output from the hunspell process are logged properly.
 
-### Version 2.0.0
+### Version 2.x
 Version 2.0.0 and above requires PHP ^8.0.0 and includes an important fix to the result matcher regex. If you need this for an older version of PHP I recommend that you fork 1.2 and update the regex matcher property of the Hunspell class to what is set in the current version of the code.
 
 [View Changelog](CHANGELOG.md)

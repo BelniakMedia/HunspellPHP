@@ -387,7 +387,7 @@ class Hunspell
                         '',
                         $matches['original'],
                         $matches['type'],
-                        $matches['offset'],
+                        intval($matches['offset']),
                         explode(", ", $matches['misses'])
                     );
                 } else {
