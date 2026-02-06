@@ -1,4 +1,9 @@
 ## Changelog
+
+### Version 4.0.2
+### Fixed
+- Fixed another type issue where int value was not always passed as the offest param to `HunspellResponse::__construct()`.
+
 ### Version 4.0.1
 ### Fixed
 - Fixed type due to possibly passing non-int value to the `$offset` parameter when instantiating `HunspellResponse` objects.

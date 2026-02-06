@@ -396,7 +396,7 @@ class Hunspell
                             '',
                             $matches['input'],
                             $matches['type'],
-                            $matches['count']
+                            intval($matches['count'])
                         );
                     }
                 }
